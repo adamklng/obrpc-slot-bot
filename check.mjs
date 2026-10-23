@@ -33,7 +33,7 @@ async function fetchSlots() {
   }
 }
 
-async function notify(title, message) {
+async function notify(title, message, priority = 'urgent') {
   if (IS_MAC) {
     const esc = s => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     try {
@@ -45,7 +45,7 @@ async function notify(title, message) {
     try {
       const res = await fetch(`https://ntfy.sh/${NTFY_TOPIC}`, {
         method: 'POST', body: message,
-        headers: { Title: title, Priority: 'urgent', Click: SIGNUP_URL, Tags: 'rotating_light' },
+        headers: { Title: title, Priority: priority, Click: SIGNUP_URL, Tags: 'rotating_light' },
       });
       if (!res.ok) log('ntfy failed: HTTP', res.status);
     } catch (e) { log('ntfy failed:', e.message); }
@@ -53,8 +53,8 @@ async function notify(title, message) {
 }
 
 function loadState() {
-  try { return { open: [], failures: 0, ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) }; }
-  catch { return { open: [], failures: 0 }; }
+  try { return { statuses: {}, failures: 0, ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) }; }
+  catch { return { statuses: {}, failures: 0 }; }
 }
 
 const saveState = state => writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
@@ -82,14 +82,28 @@ async function main() {
     return;
   }
 
-  const open = slots.filter(s => !/filled/i.test(s.status)).map(s => s.date);
-  const newlyOpen = open.filter(d => !state.open.includes(d));
-  if (newlyOpen.length) {
-    log('OPEN SLOT(S):', newlyOpen.join(', '));
-    await notify('OBRPC slot open!', `${newlyOpen.join(', ')} — register at ${SIGNUP_URL}`);
+  // Old state format only listed dates already alerted on; treat their current status as already seen.
+  if (state.open) for (const { date, status } of slots) if (state.open.includes(date)) state.statuses[date] = status;
+
+  // Alert whenever a date's status changes to anything other than "Filled" (e.g. someone drops out,
+  // or an "opening soon" date actually opens), so Filled -> open -> Filled -> open alerts each time.
+  const changed = slots.filter(s => !/filled/i.test(s.status) && state.statuses[s.date] !== s.status);
+  const isSoon = s => /soon/i.test(s.status);
+  const opened = changed.filter(s => !isSoon(s));
+  const announced = changed.filter(isSoon);
+  const describe = list => list.map(s => `${s.date}: ${s.status}`).join('\n');
+
+  if (opened.length) {
+    log('OPEN SLOT(S):', describe(opened));
+    await notify('OBRPC slot open!', `${describe(opened)}\nRegister at ${SIGNUP_URL}`);
     if (IS_MAC) execFileSync('open', [SIGNUP_URL]);
   }
-  saveState({ open, failures: 0, warnedEmpty: false, lastCheck: new Date().toISOString() });
+  if (announced.length) {
+    log('NEW DATE(S) ANNOUNCED:', describe(announced));
+    await notify('OBRPC new date announced', `${describe(announced)}\nYou'll get another alert when it opens.`, 'default');
+  }
+  const statuses = Object.fromEntries(slots.map(s => [s.date, s.status]));
+  saveState({ statuses, failures: 0, warnedEmpty: false, lastCheck: new Date().toISOString() });
 }
 
 main();
